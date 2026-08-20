@@ -1,0 +1,13 @@
+[package]
+name = "openchain-sink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openchain-core.workspace = true
+clickhouse.workspace = true
+eyre.workspace = true
+serde.workspace = true
+tracing.workspace = true

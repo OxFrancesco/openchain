@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/openchain-core",
+    "crates/openchain-evm",
+    "crates/openchain-sink",
+    "crates/openchain-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/francescooddo/openchain"
+
+[workspace.dependencies]
+openchain-core = { path = "crates/openchain-core" }
+openchain-evm = { path = "crates/openchain-evm" }
+openchain-sink = { path = "crates/openchain-sink" }
+
+alloy = { version = "2.3", features = ["full"] }
+clickhouse = { version = "0.15", features = ["time", "lz4"] }
+clap = { version = "4.5", features = ["derive"] }
+eyre = "0.6"
+futures = "0.3"
+indicatif = "0.17"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+time = "0.3"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"

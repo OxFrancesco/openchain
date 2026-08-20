@@ -1,0 +1,14 @@
+[package]
+name = "openchain-evm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openchain-core.workspace = true
+alloy.workspace = true
+eyre.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
