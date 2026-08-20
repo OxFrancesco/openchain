@@ -9,6 +9,7 @@ repository.workspace = true
 openchain-core.workspace = true
 alloy.workspace = true
 eyre.workspace = true
+serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -1,3 +1,5 @@
+pub mod decode;
+
 use alloy::consensus::Transaction as _;
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::network::Ethereum;
@@ -74,10 +76,10 @@ impl EvmSource {
         )?;
         let block = block.ok_or_else(|| eyre!("block {number} not found"))?;
         let receipts = receipts.ok_or_else(|| eyre!("receipts for block {number} not available"))?;
-        self.into_bundle(block, receipts)
+        self.build_bundle(block, receipts)
     }
 
-    fn into_bundle(&self, block: Block, receipts: Vec<TransactionReceipt>) -> Result<BlockBundle> {
+    fn build_bundle(&self, block: Block, receipts: Vec<TransactionReceipt>) -> Result<BlockBundle> {
         let version = now_millis();
         let header = &block.header;
         let number = header.number;

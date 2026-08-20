@@ -1,3 +1,5 @@
+mod abi;
+mod decode;
 mod follow;
 mod sql;
 mod sync;
@@ -62,6 +64,20 @@ enum Command {
         #[arg(long, default_value_t = 64)]
         hot_window: u64,
     },
+    /// Manage contract ABIs used for event decoding
+    Abi {
+        #[command(subcommand)]
+        action: AbiAction,
+    },
+    /// Decode raw logs into decoded_events using registered ABIs (incremental)
+    Decode {
+        /// Chain id (must exist in config)
+        #[arg(long)]
+        chain: u64,
+        /// Blocks per decode batch
+        #[arg(long, default_value_t = 1000)]
+        batch_blocks: u64,
+    },
     /// Run a SQL query against the OpenChain database
     Sql {
         /// The SQL query to run
@@ -69,6 +85,30 @@ enum Command {
         /// ClickHouse output format (PrettyCompact, JSONEachRow, CSVWithNames, ...)
         #[arg(long, default_value = "PrettyCompact")]
         format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AbiAction {
+    /// Fetch a verified ABI from Sourcify (or load from --file) and register it
+    Add {
+        /// Contract address (0x...)
+        address: String,
+        /// Chain id
+        #[arg(long)]
+        chain: u64,
+        /// Override the contract name
+        #[arg(long)]
+        name: Option<String>,
+        /// Load the ABI from a local JSON file instead of Sourcify
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// List registered ABIs for a chain
+    List {
+        /// Chain id
+        #[arg(long)]
+        chain: u64,
     },
 }
 
@@ -93,6 +133,19 @@ async fn main() -> Result<()> {
             let config = Config::load(&cli.config)?;
             let datasets = Dataset::parse_list(&datasets)?;
             follow::run(&config, chain, &datasets, poll_interval, hot_window).await
+        }
+        Command::Abi { action } => {
+            let config = Config::load(&cli.config)?;
+            match action {
+                AbiAction::Add { address, chain, name, file } => {
+                    abi::add(&config, chain, &address, name, file).await
+                }
+                AbiAction::List { chain } => abi::list(&config, chain).await,
+            }
+        }
+        Command::Decode { chain, batch_blocks } => {
+            let config = Config::load(&cli.config)?;
+            decode::run(&config, chain, batch_blocks).await
         }
         Command::Sql { query, format } => {
             let config = Config::load(&cli.config)?;

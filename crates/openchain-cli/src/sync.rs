@@ -23,20 +23,18 @@ pub async fn run(
         None | Some("latest") => source.latest_block().await?,
         Some(s) => s.parse()?,
     };
+    let mut watermark: Option<u64> = None;
+    for dataset in datasets {
+        if let Some(w) = sink.watermark(chain_id, *dataset).await? {
+            watermark = Some(watermark.map_or(w, |m| m.min(w)));
+        }
+    }
     let from = match from {
         Some(f) => f,
-        None => {
-            let mut min: Option<u64> = None;
-            for dataset in datasets {
-                if let Some(w) = sink.watermark(chain_id, *dataset).await? {
-                    min = Some(min.map_or(w, |m| m.min(w)));
-                }
-            }
-            match min {
-                Some(w) => w + 1,
-                None => bail!("no previous sync found for chain {chain_id}; pass --from"),
-            }
-        }
+        None => match watermark {
+            Some(w) => w + 1,
+            None => bail!("no previous sync found for chain {chain_id}; pass --from"),
+        },
     };
     if from > to {
         println!("chain {chain_id}: already synced to {to}, nothing to do");
@@ -73,7 +71,10 @@ pub async fn run(
         let bundles: Vec<BlockBundle> = bundles?;
         sink.insert_bundles(&bundles, datasets).await?;
         let last = bundles.last().expect("non-empty chunk").number();
-        sink.set_watermark(chain_id, datasets, last).await?;
+        // Backfilling a range below the watermark must not regress it.
+        if watermark.is_none_or(|w| last > w) {
+            sink.set_watermark(chain_id, datasets, last).await?;
+        }
         total_txs += bundles.iter().map(|b| b.txs.len() as u64).sum::<u64>();
         total_logs += bundles.iter().map(|b| b.logs.len() as u64).sum::<u64>();
         progress.inc(bundles.len() as u64);

@@ -10,16 +10,21 @@ pub enum Dataset {
     Blocks,
     Transactions,
     Logs,
+    /// Derived dataset, produced by `openchain decode` rather than sync.
+    DecodedEvents,
 }
 
 impl Dataset {
-    pub const ALL: [Dataset; 3] = [Dataset::Blocks, Dataset::Transactions, Dataset::Logs];
+    /// Every block-scoped table, i.e. everything a reorg rewind must touch.
+    pub const ALL: [Dataset; 4] =
+        [Dataset::Blocks, Dataset::Transactions, Dataset::Logs, Dataset::DecodedEvents];
 
     pub fn table(&self) -> &'static str {
         match self {
             Dataset::Blocks => "blocks",
             Dataset::Transactions => "transactions",
             Dataset::Logs => "logs",
+            Dataset::DecodedEvents => "decoded_events",
         }
     }
 
@@ -100,6 +105,32 @@ pub struct LogRow {
     pub topic3: Option<[u8; 32]>,
     #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
+    pub insert_version: u64,
+}
+
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct DecodedEventRow {
+    pub chain_id: u64,
+    pub block_number: u64,
+    pub tx_hash: [u8; 32],
+    pub tx_index: u32,
+    pub log_index: u32,
+    pub address: [u8; 20],
+    pub contract_name: String,
+    pub event_name: String,
+    pub full_signature: String,
+    /// Decoded parameters as a JSON object keyed by parameter name.
+    pub params: String,
+    pub insert_version: u64,
+}
+
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct AbiRow {
+    pub chain_id: u64,
+    pub address: [u8; 20],
+    pub name: String,
+    pub abi: String,
+    pub source: String,
     pub insert_version: u64,
 }
 
