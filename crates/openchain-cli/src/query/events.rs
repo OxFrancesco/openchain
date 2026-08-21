@@ -83,7 +83,7 @@ pub async fn run(config: &Config, args: &EventsArgs) -> Result<()> {
     Ok(())
 }
 
-fn build_sql(
+pub(crate) fn build_sql(
     chain: u64,
     event: Option<&str>,
     contract: Option<&str>,
@@ -133,7 +133,7 @@ fn build_sql(
     ))
 }
 
-fn enrich_rows(body: &str, chain: u64) -> Vec<Value> {
+pub(crate) fn enrich_rows(body: &str, chain: u64) -> Vec<Value> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

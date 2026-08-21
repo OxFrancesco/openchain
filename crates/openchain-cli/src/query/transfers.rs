@@ -153,7 +153,7 @@ fn symbol_label(resolved: &[tokens::Token]) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_sql(
+pub(crate) fn build_sql(
     chain: u64,
     addresses: &[String],
     from: Option<&str>,
@@ -207,7 +207,7 @@ fn build_sql(
     )
 }
 
-fn enrich_rows(body: &str, chain: u64, decimals: u32, symbol: &str) -> Vec<Value> {
+pub(crate) fn enrich_rows(body: &str, chain: u64, decimals: u32, symbol: &str) -> Vec<Value> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

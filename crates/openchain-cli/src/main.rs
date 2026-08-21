@@ -5,6 +5,7 @@ mod query;
 mod sql;
 mod status;
 mod sync;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use eyre::Result;
@@ -118,6 +119,12 @@ enum Command {
         #[command(flatten)]
         args: query::top::TopArgs,
     },
+    /// Interactive TUI dashboard over all views
+    Tui {
+        /// Chain to open with (defaults to the first configured)
+        #[arg(long)]
+        chain: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -210,6 +217,10 @@ async fn main() -> Result<()> {
         Command::Top { args } => {
             let config = Config::load(&cli.config)?;
             query::top::run(&config, &args).await
+        }
+        Command::Tui { chain } => {
+            let config = Config::load(&cli.config)?;
+            tui::run(&config, chain).await
         }
     }
 }

@@ -141,6 +141,27 @@ rpc = "https://ethereum-rpc.publicnode.com"
 # ws = "wss://your-ws-endpoint"   # optional; defaults to rpc with scheme swapped
 ```
 
+## TUI
+
+`openchain tui` opens an interactive dashboard over the same query layer —
+no flags to remember, filters are editable in place:
+
+```bash
+openchain tui                # or: openchain tui --chain 8453
+```
+
+| key | action |
+|---|---|
+| `1-5` / `Tab` | switch view: status · transfers · txs · events · top |
+| `enter` | run the query for this view |
+| `f` | edit filters (Tab between fields, Enter runs) — same grammar as the CLI: `30d`, `100k`, `10eth`, ENS names |
+| `↑ ↓` | scroll results |
+| `s` | show the generated SQL for the current view |
+| `r` | refresh · `c` cycle chains · `?` help · `q` quit |
+
+The status view auto-refreshes every 10 s with per-dataset row counts and head
+lag; transfers pre-loads on startup so data is on screen immediately.
+
 ## Performance
 
 Measured numbers live in [Performances.md](Performances.md). Highlights

@@ -8,7 +8,7 @@ use openchain_core::Config;
 use serde_json::{json, Value};
 
 /// keccak256("Transfer(address,address,uint256)")
-const TRANSFER_TOPIC0: &str = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+pub(crate) const TRANSFER_TOPIC0: &str = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
 /// Rank the biggest movers.
 ///
@@ -120,7 +120,7 @@ async fn run_native(config: &Config, args: &TopArgs, side: &str) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn top_sql(
+pub(crate) fn top_sql(
     chain: u64,
     side: &str,
     block_filter: &str,
@@ -167,7 +167,7 @@ fn top_sql(
     )
 }
 
-fn enrich(body: &str, chain: u64, symbol: &str, decimals: u32) -> Vec<Value> {
+pub(crate) fn enrich(body: &str, chain: u64, symbol: &str, decimals: u32) -> Vec<Value> {
     body.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
@@ -219,7 +219,7 @@ fn finish(mut rows: Vec<Value>, args: &TopArgs, side: &str, symbol: &str) -> Res
     Ok(())
 }
 
-fn range_clause(lo: Option<u64>, hi: Option<u64>) -> String {
+pub(crate) fn range_clause(lo: Option<u64>, hi: Option<u64>) -> String {
     match (lo, hi) {
         (Some(a), Some(b)) => format!("block_number BETWEEN {a} AND {b}"),
         (Some(a), None) => format!("block_number >= {a}"),
