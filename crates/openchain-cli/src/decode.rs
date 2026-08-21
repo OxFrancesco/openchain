@@ -2,7 +2,12 @@ use eyre::{bail, Result};
 use openchain_core::{Config, Dataset};
 use openchain_evm::decode::EventDecoder;
 use openchain_sink::Sink;
+use rayon::prelude::*;
 use std::time::Instant;
+
+/// Below this many logs per batch, parallel-decode overhead (thread pool
+/// wake-up, fold/reduce) outweighs the CPU saved; stay sequential.
+const PARALLEL_THRESHOLD: usize = 50_000;
 
 /// Incrementally decode raw logs into decoded_events for every registered ABI.
 /// Resumes from the decoded_events watermark up to the logs watermark.
@@ -46,18 +51,10 @@ pub async fn run(config: &Config, chain_id: u64, batch_blocks: u64) -> Result<()
         let logs = sink.logs_for_addresses(chain_id, &addresses, from, to).await?;
         scanned += logs.len() as u64;
 
-        let mut rows = Vec::with_capacity(logs.len());
-        for log in &logs {
-            match decoder.decode(log) {
-                Some(Ok(row)) => rows.push(row),
-                Some(Err(err)) => {
-                    failed += 1;
-                    tracing::debug!(block = log.block_number, log_index = log.log_index, %err, "decode failed");
-                }
-                None => unmatched += 1,
-            }
-        }
-        decoded += rows.len() as u64;
+        let (rows, stats) = decode_batch(&decoder, &logs);
+        decoded += stats.decoded;
+        unmatched += stats.unmatched;
+        failed += stats.failed;
         sink.insert_decoded(&rows).await?;
         sink.set_watermark(chain_id, &[Dataset::DecodedEvents], to).await?;
         from = to + 1;
@@ -70,4 +67,69 @@ pub async fn run(config: &Config, chain_id: u64, batch_blocks: u64) -> Result<()
         scanned as f64 / secs.max(0.001)
     );
     Ok(())
+}
+
+/// Decode one batch of logs, fanning out across cores when the batch is big
+/// enough for the thread-pool overhead to pay off.
+fn decode_batch(decoder: &EventDecoder, logs: &[openchain_core::LogRow]) -> (Vec<openchain_core::DecodedEventRow>, BatchStats) {
+    if logs.len() < PARALLEL_THRESHOLD {
+        return decode_sequential(decoder, logs);
+    }
+    logs.par_iter()
+        .map(|log| ((log.block_number, log.log_index), decoder.decode(log)))
+        .fold(
+            || (Vec::new(), BatchStats::default()),
+            |mut acc, ((block, log_index), result)| match result {
+                Some(Ok(row)) => {
+                    acc.0.push(row);
+                    acc.1.decoded += 1;
+                    acc
+                }
+                Some(Err(err)) => {
+                    acc.1.failed += 1;
+                    tracing::debug!(block, log_index, %err, "decode failed");
+                    acc
+                }
+                None => {
+                    acc.1.unmatched += 1;
+                    acc
+                }
+            },
+        )
+        .reduce(
+            || (Vec::new(), BatchStats::default()),
+            |mut a, mut b| {
+                a.0.append(&mut b.0);
+                a.1.decoded += b.1.decoded;
+                a.1.unmatched += b.1.unmatched;
+                a.1.failed += b.1.failed;
+                a
+            },
+        )
+}
+
+fn decode_sequential(decoder: &EventDecoder, logs: &[openchain_core::LogRow]) -> (Vec<openchain_core::DecodedEventRow>, BatchStats) {
+    let mut rows = Vec::with_capacity(logs.len());
+    let mut stats = BatchStats::default();
+    for log in logs {
+        match decoder.decode(log) {
+            Some(Ok(row)) => {
+                rows.push(row);
+                stats.decoded += 1;
+            }
+            Some(Err(err)) => {
+                stats.failed += 1;
+                tracing::debug!(block = log.block_number, log_index = log.log_index, %err, "decode failed");
+            }
+            None => stats.unmatched += 1,
+        }
+    }
+    (rows, stats)
+}
+
+#[derive(Default)]
+struct BatchStats {
+    decoded: u64,
+    unmatched: u64,
+    failed: u64,
 }

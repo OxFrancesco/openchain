@@ -24,10 +24,31 @@ pub struct ClickHouseConfig {
 pub struct ChainConfig {
     pub name: String,
     pub rpc: String,
+    /// Optional WebSocket endpoint for head subscriptions in follow mode.
+    /// Defaults to the rpc URL with the scheme swapped (https->wss, http->ws).
+    #[serde(default)]
+    pub ws: Option<String>,
 }
 
 fn default_user() -> String {
     "default".into()
+}
+
+impl ChainConfig {
+    /// WebSocket endpoint for follow-mode head subscriptions: the explicit
+    /// `ws` field if set, otherwise the rpc URL with the scheme swapped.
+    pub fn ws_url(&self) -> String {
+        if let Some(ws) = &self.ws {
+            return ws.clone();
+        }
+        if let Some(rest) = self.rpc.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = self.rpc.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            self.rpc.clone()
+        }
+    }
 }
 
 impl Config {
@@ -47,7 +68,7 @@ impl Config {
         let mut chains = BTreeMap::new();
         chains.insert(
             "1".to_string(),
-            ChainConfig { name: "ethereum".into(), rpc: "https://ethereum-rpc.publicnode.com".into() },
+            ChainConfig { name: "ethereum".into(), rpc: "https://ethereum-rpc.publicnode.com".into(), ws: None },
         );
         Config {
             clickhouse: ClickHouseConfig {

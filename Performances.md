@@ -8,7 +8,7 @@ storage layout changes. Never publish a number here that wasn't measured.
 
 | | |
 |---|---|
-| Date | 2026-08-20 |
+| Date | 2026-08-21 |
 | Machine | Apple M1 Pro, 8 cores, 16 GB RAM |
 | ClickHouse | 26.7.4 (Docker, single node, default settings) |
 | RPC | `ethereum-rpc.publicnode.com` (free public endpoint) |
@@ -37,18 +37,28 @@ have one (see backlog).
 
 `openchain decode` full pipeline: read logs from ClickHouse, ABI-decode with
 alloy dyn-abi, serialize params to JSON, insert into `decoded_events`.
-3 registered contracts (USDT, USDC impl, WETH), single-threaded.
+3 registered contracts (USDT, USDC impl, WETH), 188,204 logs in range.
 
 | metric | value |
 |---|---|
-| logs decoded | 164,442 |
-| wall time | 1.33 s |
-| **throughput** | **123,296 logs/s** |
+| logs decoded | 188,204 |
+| wall time | 1.56 s |
+| **throughput** | **~120,000 logs/s** |
 | failures | 0 |
 
-At this rate, all ~4.5B historical Ethereum logs would decode in ~10 hours on
-one core. Parallelizing decode across cores with rayon is the obvious next step
-(see backlog).
+End-to-end wall time is dominated by the ClickHouse read + write round-trips,
+not decode CPU. Decode itself was benchmarked in isolation (1M synthetic WETH9
+Transfer logs, `cargo run --release -p openchain-evm --example decode_bench`,
+same machine):
+
+| path | throughput | notes |
+|---|---|---|
+| sequential | 350,507 logs/s | pre-OxAlpha behavior |
+| **rayon parallel** | **904,922 logs/s** | **2.58x speedup**, 8-core M1 Pro |
+
+Batches under 50k logs stay sequential: below that threshold the thread-pool
+wake-up and fold/reduce overhead outweigh the CPU saved (measured as a ~15%
+regression on a single 188k-log batch before the guard was added).
 
 ## 3. Query latency
 
@@ -69,16 +79,27 @@ queries fast at billions of rows.
 ## 4. Follow-mode freshness
 
 Delay between a block's onchain timestamp and its ClickHouse insert
-(`insert_version - block.timestamp`), 7 live blocks, 3s HTTP polling:
+(`insert_version - block.timestamp`), 10 live blocks tailed at head via WS
+`newHeads` (HTTP polling fallback if the endpoint has no WS), 3s safety-net
+poll:
 
 | min | avg | max |
 |---|---|---|
-| 2.1 s | 5.4 s | 16.5 s |
+| 0.6 s | 5.8 s | 24.2 s |
+
+The 0.6s floor is what WS wake-up delivers when the endpoint serves the full
+block + receipts immediately. The max is the first block after subscribing:
+the head announcement races the RPC's read model, so `fetch_bundle` burns its
+retry backoff (0.5+1+2+4s) before the data is servable. The remaining ~2-4s
+steady-state is publicnode propagation + fetch time, not OpenChain. For
+comparison, pure HTTP polling on the same endpoint measured min 2.1 / avg
+5.4 / max 16.5 (2026-08-20): WS removes the polling delay from the floor but
+cannot remove the endpoint's own latency. A local reth gets both to
+sub-second.
 
 Block timestamps mark slot start; propagation to a public RPC alone costs
 ~1-2s, so ~2s is near the floor for HTTP polling. Dune's freshness for
-decoded tables is minutes. WS subscriptions and the reth ExEx path (sub-second)
-are the planned upgrades.
+decoded tables is minutes. The reth ExEx path remains the endgame.
 
 ## 5. Storage
 
@@ -104,6 +125,9 @@ openchain sql "TRUNCATE TABLE decoded_events"
 openchain sql "INSERT INTO sync_status SELECT 1,'decoded_events',0,toUnixTimestamp64Milli(now64(3))"
 time openchain decode --chain 1 --batch-blocks 10000
 
+# 2b. isolated decode CPU benchmark (no ClickHouse I/O)
+cargo run --release -p openchain-evm --example decode_bench
+
 # 3. query latency (ClickHouse-side elapsed)
 openchain sql "<query> FORMAT JSON"   # read statistics.elapsed
 
@@ -115,10 +139,17 @@ openchain sql "SELECT min(d), avg(d), max(d) FROM (SELECT insert_version/1000 - 
 
 1. **reth ExEx / local node source** — removes the RPC bottleneck entirely; sync
    throughput should jump from ~13 to hundreds of blocks/s, freshness to sub-second.
-2. **Parallel decode with rayon** — decode is single-threaded today; 8 cores ≈ 8x.
-3. **WS `newHeads` subscription in follow** — cuts the 0-3s polling delay.
-4. **Column codecs** — `CODEC(Delta, ZSTD)` on block_number/timestamp columns,
-   ZSTD level tuning; expect 30-50% smaller logs table.
+2. ~~**Parallel decode with rayon**~~ — DONE (OxAlpha): 2.58x on decode CPU
+   (350k -> 905k logs/s isolated); batches <50k logs stay sequential.
+3. ~~**WS `newHeads` subscription in follow**~~ — DONE (OxAlpha): freshness
+   floor 2.1s -> 0.6s; polling remains as fallback and safety net.
+4. ~~**Column codecs**~~ — MEASURED, NOT WORTH IT on `logs`: Delta+ZSTD on
+   block_number/insert_version shrank the table by only ~0.6% (48.77 ->
+   48.47 MiB over ~720k rows). The table is dominated by high-entropy
+   tx_hash/data/topic columns that neither codec can compress; the 30-50%
+   estimate was wrong. Codecs stay in the schema for fresh tables (free), but
+   real storage wins would come from denormalizing block_hash out of logs or
+   dictionary-encoding repeated hashes.
 5. **Batched RowBinary inserts with larger buffers** — insert overhead is currently
    negligible at these volumes; revisit at >100k rows/s sustained.
 6. **Per-endpoint adaptive rate limiting** — replace fixed retry backoff with a

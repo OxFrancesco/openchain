@@ -1,13 +1,23 @@
-use eyre::Result;
-use openchain_core::{Config, Dataset};
+use alloy::network::Ethereum;
+use alloy::providers::{Provider, RootProvider};
+use alloy::pubsub::SubscriptionStream;
+use alloy::rpc::types::Header;
+use eyre::{Context, Result};
+use futures::StreamExt;
+use openchain_core::{ChainConfig, Config, Dataset};
 use openchain_evm::EvmSource;
 use openchain_sink::Sink;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Tail the chain head. Keeps a hot window of recent block hashes; when a new
 /// block's parent hash does not match, walks back to the common ancestor,
 /// rewinds ClickHouse, and re-syncs the canonical chain.
+///
+/// Wakes on WS `newHeads` when the endpoint supports it (freshness ~0s), with
+/// HTTP polling as fallback and safety net.
 pub async fn run(
     config: &Config,
     chain_id: u64,
@@ -19,6 +29,12 @@ pub async fn run(
     let source = EvmSource::connect(&chain.rpc, chain_id).await?;
     let sink = Sink::new(&config.clickhouse);
     sink.ensure_schema().await?;
+
+    let mut heads: Option<HeadStream> = connect_heads(chain).await;
+    match &heads {
+        Some(_) => tracing::info!("newHeads subscription active"),
+        None => tracing::info!(poll_interval, "WS unavailable, polling every {poll_interval}s"),
+    }
 
     let mut window: BTreeMap<u64, [u8; 32]> = sink
         .recent_block_hashes(chain_id, hot_window)
@@ -38,7 +54,38 @@ pub async fn run(
     tracing::info!(chain_id, next, "following chain head");
 
     loop {
-        let latest = source.latest_block().await?;
+        // A head from the subscription may race the RPC's read model; fetch_bundle
+        // retries absorb that lag, so trust it as the sync target directly.
+        let latest = match heads.as_mut() {
+            Some(hs) => {
+                tokio::select! {
+                    head = hs.stream.next() => match head {
+                        Some(head) => head.inner.number,
+                        None => {
+                            tracing::warn!("head subscription closed, falling back to polling");
+                            heads = None;
+                            source.latest_block().await?
+                        }
+                    },
+                    // No head yet within poll_interval: normal between blocks
+                    // (12s on mainnet). Keep the subscription, re-check latest.
+                    _ = tokio::time::sleep(Duration::from_secs(poll_interval)) => {
+                        source.latest_block().await?
+                    }
+                }
+            }
+            None => {
+                tokio::time::sleep(Duration::from_secs(poll_interval)).await;
+                if heads.is_none() {
+                    if let Some(hs) = connect_heads(chain).await {
+                        tracing::info!("newHeads subscription restored");
+                        heads = Some(hs);
+                    }
+                }
+                source.latest_block().await?
+            }
+        };
+
         while next <= latest {
             let bundle = source.fetch_bundle(next).await?;
 
@@ -67,8 +114,34 @@ pub async fn run(
             }
             next += 1;
         }
-        tokio::time::sleep(Duration::from_secs(poll_interval)).await;
     }
+}
+
+/// WS client + head stream. The provider is kept in the struct so the
+/// underlying connection lives as long as the subscription does.
+struct HeadStream {
+    _provider: RootProvider<Ethereum>,
+    stream: SubscriptionStream<Header>,
+}
+
+async fn connect_heads(chain: &ChainConfig) -> Option<HeadStream> {
+    let url = chain.ws_url();
+    tokio::time::timeout(WS_CONNECT_TIMEOUT, async {
+        let provider = RootProvider::<Ethereum>::connect(&url)
+            .await
+            .wrap_err("cannot open WS connection")?;
+        let sub = provider.subscribe_blocks().await.wrap_err("cannot subscribe to newHeads")?;
+        Ok::<_, eyre::Report>(HeadStream { _provider: provider, stream: sub.into_stream() })
+    })
+    .await
+    .ok()
+    .and_then(|res| match res {
+        Ok(pair) => Some(pair),
+        Err(err) => {
+            tracing::debug!(%err, "newHeads subscription failed");
+            None
+        }
+    })
 }
 
 async fn find_common_ancestor(

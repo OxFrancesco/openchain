@@ -4,6 +4,6 @@ CREATE TABLE IF NOT EXISTS abis (
     name String,
     abi String,
     source LowCardinality(String),
-    insert_version UInt64
+    insert_version UInt64 CODEC(Delta, ZSTD(1))
 ) ENGINE = ReplacingMergeTree(insert_version)
 ORDER BY (chain_id, address)
