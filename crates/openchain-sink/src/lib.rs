@@ -15,6 +15,7 @@ const SCHEMAS: &[&str] = &[
     include_str!("../../../schemas/decoded_calls.sql"),
     include_str!("../../../schemas/abis.sql"),
     include_str!("../../../schemas/sync_status.sql"),
+    include_str!("../../../schemas/tokens.sql"),
 ];
 
 fn hex_lower(bytes: &[u8]) -> String {

@@ -1,6 +1,7 @@
 mod abi;
 mod decode;
 mod follow;
+mod query;
 mod sql;
 mod status;
 mod sync;
@@ -97,6 +98,21 @@ enum Command {
         #[arg(long, default_value = "PrettyCompact")]
         format: String,
     },
+    /// Token transfers with human flags: --token usdt --since 3m --min-value 100k
+    Transfers {
+        #[command(flatten)]
+        args: query::transfers::TransfersArgs,
+    },
+    /// Transactions with human flags: --from 0x… --since 7d --min-value 10eth
+    Txs {
+        #[command(flatten)]
+        args: query::txs::TxsArgs,
+    },
+    /// Decoded events with human flags: --event Swap --contract univ3 --since 30d
+    Events {
+        #[command(flatten)]
+        args: query::events::EventsArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -173,6 +189,18 @@ async fn main() -> Result<()> {
         Command::Sql { query, format } => {
             let config = Config::load(&cli.config)?;
             sql::run(&config, &query, &format).await
+        }
+        Command::Transfers { args } => {
+            let config = Config::load(&cli.config)?;
+            query::transfers::run(&config, &args).await
+        }
+        Command::Txs { args } => {
+            let config = Config::load(&cli.config)?;
+            query::txs::run(&config, &args).await
+        }
+        Command::Events { args } => {
+            let config = Config::load(&cli.config)?;
+            query::events::run(&config, &args).await
         }
     }
 }
