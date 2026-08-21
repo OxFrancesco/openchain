@@ -43,8 +43,11 @@ pub struct OutputArgs {
     /// Shortcut for --format json
     #[arg(long, conflicts_with = "format")]
     pub json: bool,
-    /// Shortcut for --format csv
+    /// Shortcut for --format jsonl (one JSON object per line)
     #[arg(long, conflicts_with_all = ["format", "json"])]
+    pub jsonl: bool,
+    /// Shortcut for --format csv
+    #[arg(long, conflicts_with_all = ["format", "json", "jsonl"])]
     pub csv: bool,
 }
 
@@ -52,6 +55,8 @@ impl OutputArgs {
     fn format(&self) -> Format {
         if self.json {
             Format::Json
+        } else if self.jsonl {
+            Format::Jsonl
         } else if self.csv {
             Format::Csv
         } else {
@@ -121,27 +126,27 @@ pub fn parse_timestamp(input: &str) -> Result<i64> {
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
 
-    // Duration form: <number><unit>
+    // Duration form: <number><unit>. Unknown units fall through to date parsing
+    // so inputs like 2024-01-01 are handled below.
     let lower = input.to_ascii_lowercase();
     let split = lower.find(|c: char| !c.is_ascii_digit() && c != '.' && c != ',');
     if let Some(pos) = split {
         let (num, unit) = lower.split_at(pos);
-        let num: f64 = num.trim().replace(',', "").parse().map_err(|_| {
-            eyre!("invalid time '{input}' — try 24h, 7d, 3m, or a date like 2024-01-01")
-        })?;
-        let secs = match unit.trim() {
-            "s" | "sec" | "secs" | "second" | "seconds" => num * 1.0,
-            "min" | "mins" | "minute" | "minutes" => num * 60.0,
-            "h" | "hr" | "hour" | "hours" => num * 3600.0,
-            "d" | "day" | "days" => num * 86400.0,
-            "w" | "week" | "weeks" => num * 604800.0,
-            "mo" | "month" | "months" | "m" => num * 2592000.0, // 30 days
-            "y" | "year" | "years" => num * 31536000.0,         // 365 days
-            _ => bail!(
-                "unknown time unit '{unit}' in '{input}' — units: s, min, h, d, w, m (months), y"
-            ),
-        };
-        return Ok(now - secs as i64);
+        if let Ok(num) = num.trim().replace(',', "").parse::<f64>() {
+            let secs = match unit.trim() {
+                "s" | "sec" | "secs" | "second" | "seconds" => Some(num * 1.0),
+                "min" | "mins" | "minute" | "minutes" => Some(num * 60.0),
+                "h" | "hr" | "hour" | "hours" => Some(num * 3600.0),
+                "d" | "day" | "days" => Some(num * 86400.0),
+                "w" | "week" | "weeks" => Some(num * 604800.0),
+                "mo" | "month" | "months" | "m" => Some(num * 2592000.0), // 30 days
+                "y" | "year" | "years" => Some(num * 31536000.0),         // 365 days
+                _ => None,
+            };
+            if let Some(secs) = secs {
+                return Ok(now - secs as i64);
+            }
+        }
     }
 
     // Date forms
@@ -186,12 +191,13 @@ pub fn parse_amount(input: &str) -> Result<f64> {
 /// Parse a native-ETH amount: bare numbers are wei; `gwei` and `eth` suffixes supported.
 pub fn parse_native_amount(input: &str) -> Result<f64> {
     let lower = input.trim().to_ascii_lowercase();
-    let wei = if let Some(n) = lower.strip_suffix("wei") {
-        n.parse::<f64>()?
-    } else if let Some(n) = lower.strip_suffix("gwei") {
+    // Longest suffix first: "200gwei" must not match "wei".
+    let wei = if let Some(n) = lower.strip_suffix("gwei") {
         n.parse::<f64>()? * 1e9
     } else if let Some(n) = lower.strip_suffix("eth") {
         parse_amount(n)? * 1e18
+    } else if let Some(n) = lower.strip_suffix("wei") {
+        n.parse::<f64>()?
     } else {
         parse_amount(&lower)?
     };
@@ -420,7 +426,7 @@ pub fn group_digits(int_part: &str) -> String {
     let digits = int_part.trim_start_matches('-');
     let mut grouped = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(c);
