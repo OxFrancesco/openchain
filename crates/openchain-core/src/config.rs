@@ -53,9 +53,37 @@ impl ChainConfig {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            // Fall back to the global location for the default relative path,
+            // so commands work from any working directory.
+            let is_default = path == Path::new("openchain.toml");
+            let global = Self::global_path().filter(|_| is_default);
+            if let Some(global) = global.as_ref() {
+                if global.exists() {
+                    return Self::load(global);
+                }
+            }
+            let mut msg = format!("cannot read config at {}", path.display());
+            if let Some(global) = global {
+                msg.push_str(&format!(
+                    " (also looked at {}; create one with `openchain init`)",
+                    global.display()
+                ));
+            }
+            eyre::bail!("{msg}");
+        }
         let raw = std::fs::read_to_string(path)
             .wrap_err_with(|| format!("cannot read config at {}", path.display()))?;
         toml::from_str(&raw).wrap_err("invalid config file")
+    }
+
+    /// Global config location: $XDG_CONFIG_HOME or ~/.config.
+    pub fn global_path() -> Option<std::path::PathBuf> {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.config")))?;
+        Some(std::path::PathBuf::from(base).join("openchain/openchain.toml"))
     }
 
     pub fn chain(&self, chain_id: u64) -> Result<&ChainConfig> {

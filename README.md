@@ -126,7 +126,9 @@ and halves when the endpoint signals throttling.
 
 ## Configuration
 
-`openchain.toml`:
+`openchain.toml` — loaded from the current directory, falling back to
+`~/.config/openchain/openchain.toml` (respects `$XDG_CONFIG_HOME`) so commands
+work from anywhere:
 
 ```toml
 [clickhouse]
