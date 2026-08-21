@@ -1,12 +1,15 @@
 use clickhouse::{Client, Row};
 use eyre::{Context, Result};
-use openchain_core::{now_millis, AbiRow, BlockBundle, ClickHouseConfig, Dataset, DecodedEventRow, LogRow};
+use openchain_core::{
+    now_millis, AbiRow, BlockBundle, ClickHouseConfig, Dataset, DecodedEventRow, LogRow, TraceRow,
+};
 use serde::{Deserialize, Serialize};
 
 const SCHEMAS: &[&str] = &[
     include_str!("../../../schemas/blocks.sql"),
     include_str!("../../../schemas/transactions.sql"),
     include_str!("../../../schemas/logs.sql"),
+    include_str!("../../../schemas/traces.sql"),
     include_str!("../../../schemas/decoded_events.sql"),
     include_str!("../../../schemas/abis.sql"),
     include_str!("../../../schemas/sync_status.sql"),
@@ -28,6 +31,15 @@ struct WatermarkRow {
 pub struct BlockHashRow {
     pub block_number: u64,
     pub block_hash: [u8; 32],
+}
+
+#[derive(Debug)]
+pub struct DatasetStats {
+    pub dataset: Dataset,
+    pub watermark: Option<u64>,
+    pub rows: u64,
+    pub min_block: u64,
+    pub max_block: u64,
 }
 
 pub struct Sink {
@@ -208,6 +220,35 @@ impl Sink {
         }
         insert.end().await?;
         Ok(())
+    }
+
+    pub async fn insert_traces(&self, rows: &[TraceRow]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert::<TraceRow>("traces").await?;
+        for row in rows {
+            insert.write(row).await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
+    /// Row count and block range per dataset, for `openchain status`.
+    pub async fn dataset_stats(&self, chain_id: u64) -> Result<Vec<DatasetStats>> {
+        let mut out = Vec::new();
+        for dataset in Dataset::ALL {
+            let watermark = self.watermark(chain_id, dataset).await?;
+            let sql = format!(
+                "SELECT count(), min(block_number), max(block_number) FROM {} WHERE chain_id = ? HAVING count() > 0",
+                dataset.table()
+            );
+            let rows: Vec<(u64, u64, u64)> =
+                self.client.query(&sql).bind(chain_id).fetch_all().await?;
+            let (count, min_block, max_block) = rows.into_iter().next().unwrap_or((0, 0, 0));
+            out.push(DatasetStats { dataset, watermark, rows: count, min_block, max_block });
+        }
+        Ok(out)
     }
 
     /// Recent canonical block hashes, used to seed the follow-mode hot window.

@@ -1,17 +1,31 @@
 pub mod decode;
+pub mod ratelimit;
 
 use alloy::consensus::Transaction as _;
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::network::Ethereum;
+use alloy::providers::ext::TraceApi;
 use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::types::{Block, TransactionReceipt};
+use alloy::rpc::types::trace::parity::{
+    Action, LocalizedTransactionTrace, TraceOutput,
+};
 use eyre::{eyre, Context, Result};
-use openchain_core::{now_millis, BlockBundle, BlockRow, LogRow, TxRow};
+use openchain_core::{now_millis, BlockBundle, BlockRow, LogRow, TraceRow, TxRow};
 use std::collections::HashMap;
 use std::time::Duration;
 use time::OffsetDateTime;
 
 const RETRIES: u32 = 4;
+
+/// A fetched bundle plus whether the endpoint showed throttle signs along the
+/// way (retries recovered it, but the caller's rate governor must know).
+#[derive(Debug, Clone)]
+pub struct BundleOutcome {
+    pub bundle: BlockBundle,
+    pub traces: Option<Vec<TraceRow>>,
+    pub throttled: bool,
+}
 
 /// An EVM chain data source backed by any JSON-RPC endpoint.
 /// Extracts blocks, transactions, and logs with two calls per block:
@@ -53,12 +67,30 @@ impl EvmSource {
 
     /// Fetch one block's full bundle with retries and exponential backoff.
     pub async fn fetch_bundle(&self, number: u64) -> Result<BlockBundle> {
+        self.fetch_outcome(number, false).await.map(|o| o.bundle)
+    }
+
+    /// Fetch a block's Parity-style traces (internal txs, creates,
+    /// selfdestructs) with retries. Requires an endpoint with `trace_block`.
+    pub async fn fetch_traces(&self, number: u64) -> Result<Vec<TraceRow>> {
+        self.fetch_outcome(number, true).await.map(|o| o.traces.unwrap_or_default())
+    }
+
+    /// Bundle + optional traces in one call, reporting whether any attempt hit
+    /// a throttle-class error so the caller can back its concurrency off.
+    pub async fn fetch_outcome(&self, number: u64, want_traces: bool) -> Result<BundleOutcome> {
         let mut delay = Duration::from_millis(500);
+        let mut throttled = false;
         let mut last_err = None;
         for attempt in 0..RETRIES {
-            match self.try_fetch_bundle(number).await {
-                Ok(bundle) => return Ok(bundle),
+            match self.try_fetch_outcome(number, want_traces).await {
+                Ok((bundle, traces)) => {
+                    return Ok(BundleOutcome { bundle, traces, throttled })
+                }
                 Err(err) => {
+                    if ratelimit::is_throttle_error(&err) {
+                        throttled = true;
+                    }
                     tracing::debug!(number, attempt, %err, "fetch failed, retrying");
                     last_err = Some(err);
                     tokio::time::sleep(delay).await;
@@ -66,17 +98,35 @@ impl EvmSource {
                 }
             }
         }
-        Err(last_err.unwrap().wrap_err(format!("block {number}: fetch failed after {RETRIES} attempts")))
+        Err(last_err
+            .unwrap()
+            .wrap_err(format!("block {number}: fetch failed after {RETRIES} attempts")))
     }
 
-    async fn try_fetch_bundle(&self, number: u64) -> Result<BlockBundle> {
+    async fn try_fetch_outcome(
+        &self,
+        number: u64,
+        want_traces: bool,
+    ) -> Result<(BlockBundle, Option<Vec<TraceRow>>)> {
         let (block, receipts) = tokio::try_join!(
             self.provider.get_block_by_number(BlockNumberOrTag::Number(number)).full(),
             self.provider.get_block_receipts(BlockId::number(number)),
         )?;
         let block = block.ok_or_else(|| eyre!("block {number} not found"))?;
         let receipts = receipts.ok_or_else(|| eyre!("receipts for block {number} not available"))?;
-        self.build_bundle(block, receipts)
+        let bundle = self.build_bundle(block, receipts)?;
+        let traces = if want_traces { Some(self.try_fetch_traces(number).await?) } else { None };
+        Ok((bundle, traces))
+    }
+
+    async fn try_fetch_traces(&self, number: u64) -> Result<Vec<TraceRow>> {
+        let traces = self
+            .provider
+            .trace_block(BlockId::number(number))
+            .await
+            .map_err(|err| eyre!(err))?;
+        let version = now_millis();
+        Ok(traces.iter().filter_map(|t| build_trace_row(t, self.chain_id, number, version)).collect())
     }
 
     fn build_bundle(&self, block: Block, receipts: Vec<TransactionReceipt>) -> Result<BlockBundle> {
@@ -161,4 +211,123 @@ impl EvmSource {
 
 fn saturating_u128(v: alloy::primitives::U256) -> u128 {
     v.try_into().unwrap_or(u128::MAX)
+}
+
+fn build_trace_row(
+    t: &LocalizedTransactionTrace,
+    chain_id: u64,
+    block_number: u64,
+    version: u64,
+) -> Option<TraceRow> {
+    let tx_hash = t.transaction_hash.map(|h| h.0).unwrap_or([0; 32]);
+    let tx_index = t
+        .transaction_position
+        .map(|p| p as u32)
+        .unwrap_or(u32::MAX);
+    let trace_address = t
+        .trace
+        .trace_address
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join("_");
+    let subtraces = t.trace.subtraces as u32;
+    let error = t.trace.error.clone();
+
+    let (kind, call_type, from, to, created_contract, value, gas, gas_used, input, output, reward_type, refund_address) =
+        match &t.trace.action {
+            Action::Call(call) => {
+                let (gas_used, output) = match &t.trace.result {
+                    Some(TraceOutput::Call(out)) => (out.gas_used, out.output.to_vec()),
+                    _ => (0, Vec::new()),
+                };
+                (
+                    "call",
+                    call.call_type.to_string(),
+                    call.from.0 .0,
+                    Some(call.to.0 .0),
+                    None,
+                    saturating_u128(call.value),
+                    call.gas,
+                    gas_used,
+                    call.input.to_vec(),
+                    output,
+                    String::new(),
+                    None,
+                )
+            }
+            Action::Create(create) => {
+                let (created, gas_used, output) = match &t.trace.result {
+                    Some(TraceOutput::Create(out)) => {
+                        (Some(out.address.0 .0), out.gas_used, out.code.to_vec())
+                    }
+                    _ => (None, 0, Vec::new()),
+                };
+                (
+                    "create",
+                    String::new(),
+                    create.from.0 .0,
+                    None,
+                    created,
+                    saturating_u128(create.value),
+                    create.gas,
+                    gas_used,
+                    create.init.to_vec(),
+                    output,
+                    String::new(),
+                    None,
+                )
+            }
+            Action::Selfdestruct(sd) => (
+                "selfdestruct",
+                String::new(),
+                sd.address.0 .0,
+                None,
+                None,
+                saturating_u128(sd.balance),
+                0,
+                0,
+                Vec::new(),
+                Vec::new(),
+                String::new(),
+                Some(sd.refund_address.0 .0),
+            ),
+            Action::Reward(reward) => (
+                "reward",
+                String::new(),
+                [0; 20],
+                Some(reward.author.0 .0),
+                None,
+                saturating_u128(reward.value),
+                0,
+                0,
+                Vec::new(),
+                Vec::new(),
+                format!("{:?}", reward.reward_type).to_lowercase(),
+                None,
+            ),
+        };
+
+    Some(TraceRow {
+        chain_id,
+        block_number,
+        tx_hash,
+        tx_index,
+        trace_address,
+        kind: kind.to_string(),
+        call_type,
+        from_address: from,
+        to_address: to,
+        created_contract,
+        value,
+        gas,
+        gas_used,
+        error,
+        subtraces,
+        input,
+        output,
+        reward_type,
+        refund_address,
+        insert_version: version,
+    })
 }

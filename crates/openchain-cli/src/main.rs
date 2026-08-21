@@ -2,6 +2,7 @@ mod abi;
 mod decode;
 mod follow;
 mod sql;
+mod status;
 mod sync;
 
 use clap::{Parser, Subcommand};
@@ -39,22 +40,26 @@ enum Command {
         /// Last block to sync, or "latest" (default)
         #[arg(long)]
         to: Option<String>,
-        /// Comma-separated datasets: blocks, transactions, logs
+        /// Comma-separated datasets: blocks, transactions, logs, traces
+        /// (traces need an endpoint with the trace_block method)
         #[arg(long, default_value = "blocks,transactions,logs")]
         datasets: String,
         /// Blocks per ClickHouse insert batch
         #[arg(long, default_value_t = 10)]
         chunk_size: u64,
-        /// Concurrent chunk fetches in flight
+        /// Initial concurrent block fetches; adapts up/down automatically
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
+        /// Upper bound for adaptive concurrency
+        #[arg(long, default_value_t = 32)]
+        max_concurrency: usize,
     },
     /// Tail the chain head live with reorg handling
     Follow {
         /// Chain id (must exist in config)
         #[arg(long)]
         chain: u64,
-        /// Comma-separated datasets: blocks, transactions, logs
+        /// Comma-separated datasets: blocks, transactions, logs, traces
         #[arg(long, default_value = "blocks,transactions,logs")]
         datasets: String,
         /// Seconds between head polls
@@ -63,6 +68,12 @@ enum Command {
         /// Reorg-safe hot window size in blocks
         #[arg(long, default_value_t = 64)]
         hot_window: u64,
+    },
+    /// Show per-dataset row counts, ranges, and watermarks for a chain
+    Status {
+        /// Chain id (must exist in config)
+        #[arg(long)]
+        chain: u64,
     },
     /// Manage contract ABIs used for event decoding
     Abi {
@@ -124,15 +135,27 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { force } => init(&cli.config, force).await,
-        Command::Sync { chain, from, to, datasets, chunk_size, concurrency } => {
+        Command::Sync { chain, from, to, datasets, chunk_size, concurrency, max_concurrency } => {
             let config = Config::load(&cli.config)?;
             let datasets = Dataset::parse_list(&datasets)?;
-            sync::run(&config, chain, from, to, &datasets, chunk_size, concurrency).await
+            sync::run(
+                &config,
+                chain,
+                from,
+                to,
+                &datasets,
+                &sync::SyncOptions { chunk_size, concurrency, max_concurrency },
+            )
+            .await
         }
         Command::Follow { chain, datasets, poll_interval, hot_window } => {
             let config = Config::load(&cli.config)?;
             let datasets = Dataset::parse_list(&datasets)?;
             follow::run(&config, chain, &datasets, poll_interval, hot_window).await
+        }
+        Command::Status { chain } => {
+            let config = Config::load(&cli.config)?;
+            status::run(&config, chain).await
         }
         Command::Abi { action } => {
             let config = Config::load(&cli.config)?;

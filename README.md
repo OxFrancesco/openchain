@@ -8,6 +8,8 @@ into queryable event tables.
 RPC ──sync──▶ ClickHouse ──decode──▶ decoded_events
  ▲                │
  └── follow (WS newHeads + polling fallback, reorg-safe)
+
+datasets: blocks · transactions · logs · traces (internal txs / call tree)
 ```
 
 ## Why
@@ -24,11 +26,17 @@ Requires Rust and a running ClickHouse instance.
 cargo install --path crates/openchain-cli
 
 openchain init                      # writes openchain.toml + creates schema
-openchain sync --chain 1            # backfill (resumable)
+openchain sync --chain 1            # backfill (resumable, adaptive rate limiting)
+openchain status --chain 1          # per-dataset rows, ranges, watermarks, head lag
+
+# traces (internal transactions) need a tracing endpoint:
+#   publicnode requires a paid token; drpc's free tier works
+openchain sync --chain 1 --datasets blocks,transactions,logs,traces
+
 openchain abi add 0xdAC17F958D2ee523a2206206994597C13D831ec7 --chain 1
 openchain decode --chain 1          # decode raw logs for registered ABIs
-openchain sql "SELECT count() FROM logs WHERE chain_id = 1"
-openchain follow --chain 1          # tail the head live
+openchain sql "SELECT count() FROM traces WHERE chain_id = 1"
+openchain follow --chain 1 --datasets blocks,transactions,logs  # tail the head live
 ```
 
 ## Commands
@@ -36,11 +44,16 @@ openchain follow --chain 1          # tail the head live
 | command | what it does |
 |---|---|
 | `init` | Write default config and create the ClickHouse schema |
-| `sync` | Backfill a block range into `blocks`/`transactions`/`logs` (resumable watermarks) |
+| `sync` | Backfill a block range (resumable watermarks); `--datasets` picks blocks/transactions/logs/traces |
 | `follow` | Tail the chain head live; WS `newHeads` when available, HTTP polling fallback, reorg rewind |
+| `status` | Per-dataset row counts, block ranges, watermarks, and head lag |
 | `abi add/list` | Register contract ABIs (Sourcify or local JSON) used by `decode` |
 | `decode` | Incrementally decode raw logs into `decoded_events` (parallel across cores) |
 | `sql` | Run SQL against the OpenChain database |
+
+Sync concurrency adapts to the endpoint automatically: it starts at
+`--concurrency`, grows +25% per 8 clean fetches up to `--max-concurrency`,
+and halves when the endpoint signals throttling.
 
 ## Configuration
 
@@ -62,9 +75,17 @@ rpc = "https://ethereum-rpc.publicnode.com"
 ## Performance
 
 Measured numbers live in [Performances.md](Performances.md). Highlights
-(M1 Pro, free public RPC): ~13 blocks/s backfill (RPC-bound), ~120k logs/s
-single-batch decode, per-contract log queries at ~3 ms, sub-6s average
-freshness in follow mode.
+(M1 Pro, free public RPC): ~13 blocks/s backfill when the endpoint allows it
+with adaptive throttling 2.6x faster than fixed concurrency under load,
+~120k logs/s end-to-end decode (2.6x on decode CPU), per-contract log
+queries at ~3 ms, sub-second best-case freshness in follow mode.
+
+## Dune parity roadmap
+
+Initial parity target tracked in [Performances.md](Performances.md):
+raw tables (blocks/txs/logs/traces) and decoded events are in; next up are
+decoded calls (ABI-decoded `traces.input`), multi-chain fan-out ergonomics,
+and a reth ExEx source for sub-second, rate-limit-free ingestion.
 
 ## Layout
 

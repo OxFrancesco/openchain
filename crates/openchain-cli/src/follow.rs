@@ -88,6 +88,11 @@ pub async fn run(
 
         while next <= latest {
             let bundle = source.fetch_bundle(next).await?;
+            let traces = if datasets.contains(&Dataset::Traces) {
+                Some(source.fetch_traces(next).await?)
+            } else {
+                None
+            };
 
             if let Some(parent) = window.get(&(next - 1)) {
                 if *parent != bundle.block.parent_hash {
@@ -107,6 +112,9 @@ pub async fn run(
                 "synced"
             );
             sink.insert_bundles(std::slice::from_ref(&bundle), datasets).await?;
+            if let Some(traces) = traces {
+                sink.insert_traces(&traces).await?;
+            }
             sink.set_watermark(chain_id, datasets, next).await?;
             window.insert(next, bundle.block.block_hash);
             while window.len() as u64 > hot_window {

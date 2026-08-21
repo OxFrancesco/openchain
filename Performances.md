@@ -19,19 +19,21 @@ storage layout changes. Never publish a number here that wasn't measured.
 
 `openchain sync` on fresh 100-block mainnet ranges, wall-clock timed. Each block
 costs 2 RPC calls (`eth_getBlockByNumber` full + `eth_getBlockReceipts`).
+Numbers move with the endpoint's load, so comparisons are interleaved A/B runs
+minutes apart.
 
-| concurrency | chunk | blocks/s | txs/s | logs/s | notes |
-|---|---|---|---|---|---|
-| 2 | 5 | 6.6 | ~1,700 | ~5,400 | under-parallelized |
-| **4 (default)** | **10** | **13.5** | **~3,900** | **~11,300** | sweet spot on publicnode |
-| 8 | 10 | 11.0 | ~3,000 | ~7,700 | throttling begins |
-| 12 | 25 | 2.5 | ~680 | ~2,000 | rate-limited hard, retries dominate |
+| run | concurrency | blocks/s | notes |
+|---|---|---|---|
+| fixed (pre-governor) | 4 | 13.5 | quiet endpoint (2026-08-20) |
+| fixed (pre-governor) | **10** | **2.5** | rate-limited hard, retries dominate |
+| adaptive governor | 4 -> ~15 | 2.6-11 | tracks the endpoint's momentary ceiling |
+| **adaptive governor** | **under throttle** | **7.2 vs 2.7 fixed** | **2.6x in interleaved A/B** |
 
-**Bottleneck: the RPC endpoint, not OpenChain.** CPU usage during the default run
-was 1.1s user over 7.4s wall (~15% of one core). The free publicnode endpoint
-rate-limits aggressively above ~8 concurrent block fetches. Against a local reth
-node these numbers should be 1-2 orders of magnitude higher; re-measure when we
-have one (see backlog).
+The governor starts at `--concurrency` and adapts: +25% per 8 clean fetches,
+halved whenever a fetch shows throttle signs (HTTP 429, -32005/-32029,
+timeouts — detected inside the retry loop, not after it gives up). Under a
+throttling endpoint this is what kills the "retries dominate" death spiral;
+on a healthy or local endpoint it ramps to `--max-concurrency` on its own.
 
 ## 2. Decode throughput
 
@@ -108,7 +110,12 @@ decoded tables is minutes. The reth ExEx path remains the endgame.
 | logs | 436,439 | 28.8 MiB | ~69 |
 | transactions | 150,902 | 31.8 MiB | ~221 |
 | decoded_events | 164,442 | 12.3 MiB | ~79 |
+| traces | 21,349 | 1.33 MiB | ~65 |
 | blocks | 551 | 68.5 KiB | ~127 |
+
+Traces run ~1.4-2.4k per recent mainnet block at ~65 compressed bytes/row —
+full mainnet history is multiple TB. Sync them for recent windows or against
+a local node, not all of mainnet over a free RPC.
 
 Fixed-width binary columns (`FixedString(20/32)`) + ClickHouse compression.
 Extrapolated, full mainnet logs (~4.5B rows) ≈ ~300 GB before tuning
@@ -152,5 +159,27 @@ openchain sql "SELECT min(d), avg(d), max(d) FROM (SELECT insert_version/1000 - 
    dictionary-encoding repeated hashes.
 5. **Batched RowBinary inserts with larger buffers** — insert overhead is currently
    negligible at these volumes; revisit at >100k rows/s sustained.
-6. **Per-endpoint adaptive rate limiting** — replace fixed retry backoff with a
-   governor that finds the endpoint's sustainable rate automatically.
+6. ~~**Per-endpoint adaptive rate limiting**~~ — DONE (OxAlpha): AIMD governor
+   in the sync path; 2.6x over fixed concurrency under endpoint throttling
+   (see section 1).
+
+## Feature parity roadmap (vs Dune, "initial" scope)
+
+Shipped on OxAlpha:
+
+- **traces dataset** — Parity-style internal transactions, creates,
+  selfdestructs via `trace_block` (`--datasets traces`; needs a tracing
+  endpoint — publicnode requires a paid token, drpc's free tier works).
+  ~2.4k traces/block on mainnet; ORDER BY (chain_id, block_number, tx_index)
+  keeps range scans and joins local.
+- **`openchain status`** — per-dataset rows/ranges/watermarks + head lag.
+
+Still missing for credible initial parity, in order:
+
+1. **Decoded calls** — decode `traces.input` against registered ABIs (swap(),
+   transfer()...) into `decoded_calls`. All the pieces exist: we already store
+   traces and have an ABI registry; mirror `openchain decode` for calls.
+2. **Multi-chain ergonomics** — config already supports N chains; add
+   `--chain all` fan-out to sync/follow and per-chain status.
+3. **reth ExEx / local node source** (backlog #1) — also unlocks sub-second
+   freshness and unblocks trace-heavy ingestion without paid RPCs.
