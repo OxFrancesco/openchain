@@ -113,6 +113,11 @@ enum Command {
         #[command(flatten)]
         args: query::events::EventsArgs,
     },
+    /// Rank the biggest movers: top --token usdt --since 24h [--side senders]
+    Top {
+        #[command(flatten)]
+        args: query::top::TopArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -201,6 +206,10 @@ async fn main() -> Result<()> {
         Command::Events { args } => {
             let config = Config::load(&cli.config)?;
             query::events::run(&config, &args).await
+        }
+        Command::Top { args } => {
+            let config = Config::load(&cli.config)?;
+            query::top::run(&config, &args).await
         }
     }
 }

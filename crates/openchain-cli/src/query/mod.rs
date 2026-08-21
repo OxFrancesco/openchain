@@ -1,12 +1,16 @@
+pub mod ens;
 pub mod events;
 pub mod tokens;
+pub mod top;
 pub mod transfers;
 pub mod txs;
+
+pub use ens::parse_address_or_name;
 
 use clap::ValueEnum;
 use eyre::{bail, eyre, Context, Result};
 use openchain_core::Config;
-use serde_json::Value;
+use serde_json::{json, Value};
 use time::format_description::well_known::Iso8601;
 use time::macros::format_description;
 use time::PrimitiveDateTime;
@@ -289,6 +293,74 @@ pub async fn resolve_range(
     Ok((lo, hi))
 }
 
+/// True when the blocks table has any rows for this chain.
+pub async fn has_blocks(config: &Config, chain: u64) -> bool {
+    ch_row(
+        config,
+        &format!("SELECT 1 FROM blocks WHERE chain_id = {chain} LIMIT 1"),
+    )
+    .await
+    .map(|v| !v.is_null())
+    .unwrap_or(false)
+}
+
+/// Resolve the set of chains to query: one explicit chain, or every chain
+/// configured in openchain.toml when `--chain` is omitted.
+pub fn target_chains(config: &Config, chain: Option<u64>) -> Result<Vec<u64>> {
+    if let Some(c) = chain {
+        // Validate against config so typos fail fast.
+        config.chain(c)?;
+        return Ok(vec![c]);
+    }
+    let mut chains: Vec<u64> = config
+        .chains
+        .keys()
+        .filter_map(|k| k.parse::<u64>().ok())
+        .collect();
+    chains.sort_unstable();
+    if chains.is_empty() {
+        bail!("no [chains.<id>] sections in config — add one or pass --chain");
+    }
+    Ok(chains)
+}
+
+/// Merge per-chain result rows (each carrying a numeric `ts`) newest-first and
+/// cap at `limit`. Rows missing `ts` sort last.
+pub fn merge_by_ts(mut rows: Vec<Value>, limit: u64) -> Vec<Value> {
+    rows.sort_by(|a, b| {
+        let ta = a.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+        let tb = b.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+        tb.cmp(&ta)
+    });
+    rows.truncate(limit as usize);
+    rows
+}
+
+/// Merge ranked rows across chains by descending `volume_raw` (numeric when it
+/// fits u128, string length otherwise), cap at `limit`, and stamp 1-based
+/// `rank` on each row.
+pub fn merge_rows_by_volume(rows: Vec<Value>, limit: u64) -> Vec<Value> {
+    let key = |v: &Value| -> (u128, usize) {
+        let raw = v.get("volume_raw").and_then(|x| x.as_str()).unwrap_or("0");
+        match raw.parse::<u128>() {
+            Ok(n) => (n, raw.len()),
+            Err(_) => (u128::MAX, raw.len()), // bigger-than-u128 magnitudes sort by digits
+        }
+    };
+    let mut rows: Vec<Value> = rows;
+    rows.sort_by_key(|v| std::cmp::Reverse(key(v)));
+    rows.truncate(limit as usize);
+    rows.into_iter()
+        .enumerate()
+        .map(|(i, mut r)| {
+            if let Some(obj) = r.as_object_mut() {
+                obj.insert("rank".into(), json!((i + 1).to_string()));
+            }
+            r
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Address parsing + output rendering
 // ---------------------------------------------------------------------------
@@ -472,4 +544,31 @@ pub fn human_age(ts: i64, now: i64) -> String {
         3600..=86399 => format!("{}h", d / 3600),
         _ => format!("{}d", d / 86400),
     }
+}
+
+/// ISO-8601 UTC timestamp from unix seconds.
+pub fn iso_time(ts: i64) -> String {
+    let days = ts.div_euclid(86400);
+    let secs = ts.rem_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+/// Howard Hinnant's civil-from-days algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }

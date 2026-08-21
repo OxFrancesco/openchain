@@ -21,7 +21,10 @@ no ABI registration required for transfers:
 |---|---|
 | all USDT transfers over 100k in the last 3 months | `openchain transfers --chain 1 --token usdt --since 3m --min-value 100k` |
 | USDT sent *to* an address last week | `openchain transfers --chain 1 --token usdt --to 0xA9D1…3eef --since 7d` |
-| every big stablecoin move today | `openchain transfers --chain 1 --token usdt,usdc,dai --since 24h --min-value 10m` |
+| USDT sent to vitalik.eth (ENS works) | `openchain transfers --chain 1 --token usdt --to vitalik.eth` |
+| every big stablecoin move today, all configured chains | `openchain transfers --token usdt,usdc,dai --since 24h --min-value 10m` |
+| who received the most USDT in the last 24 hours | `openchain top --chain 1 --token usdt --since 24h` |
+| biggest ETH senders today | `openchain top --native --side senders --since 24h` |
 | txs from an address worth over 10 ETH in a block range | `openchain txs --chain 1 --from 0x… --min-value 10eth --blocks 25800000..25803202` |
 | reverted txs to a contract yesterday | `openchain txs --chain 1 --to 0x… --status reverted --until 2026-08-20` |
 | WETH deposits in the last hour | `openchain events --chain 1 --event Deposit --contract WETH9 --since 1h` |
@@ -39,6 +42,11 @@ Flag grammar, shared by all query commands:
 - **tokens**: `--token` takes a symbol (`usdt`) or contract address. Symbols
   resolve from a built-in list of majors; unknown addresses get decimals
   fetched on-chain once and cached in the `tokens` table.
+- **addresses**: `--from`/`--to` accept ENS names (`vitalik.eth`) — resolved
+  through the `[chains.1]` RPC — or plain `0x` addresses.
+- **chains**: `--chain` is optional on query commands. Omit it to fan out
+  across every chain in `openchain.toml`; chains without synced data or
+  without that token are skipped with a note, results merge newest-first.
 - **output**: table for humans; `--json`/`--jsonl`/`--csv` carry full-precision
   values plus both raw and decimal amounts for machines.
 
@@ -52,6 +60,21 @@ age    value (USDT)   from             to               tx               block
 30m    2,024,000.00   0x424b149f…5c36  0x11d863b9…805e  0x89923064…aaa7  25803201
 
 4 rows
+```
+
+Rankings work too:
+
+```bash
+$ openchain top --chain 1 --token usdt --since 24h --limit 5
+#   recipient (USDT)        total (USDT)   txs
+-  -----------------  ------------------  ----
+1    0xBBBBBBBB…FFCB  303,446,282.06903   241
+2    0x28C6C062…1D60  134,212,522.321648  2827
+3    0x06CFF708…F5EF  123,438,457.357841   126
+4    0x77134CBC…35EC  119,927,320.448686    36
+5    0x4B47D729…21B3  100,580,483.879971    22
+
+5 rows
 ```
 
 ## Why
@@ -94,6 +117,7 @@ openchain follow --chain 1 --datasets blocks,transactions,logs  # tail the head 
 | `transfers` | Token transfers with human flags: `--token usdt --since 3m --min-value 100k` |
 | `txs` | Transactions with human flags: `--from 0x… --since 7d --min-value 10eth --status reverted` |
 | `events` | Decoded events with human flags: `--event Swap --contract univ3 --since 30d` |
+| `top` | Rank biggest movers: `top --token usdt --since 24h [--side senders] [--native]` |
 | `sql` | Run SQL against the OpenChain database |
 
 Sync concurrency adapts to the endpoint automatically: it starts at
