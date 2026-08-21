@@ -1,8 +1,8 @@
-use alloy::dyn_abi::{DynSolEvent, DynSolValue, Specifier};
+use alloy::dyn_abi::{DynSolType, DynSolEvent, DynSolValue, Specifier};
 use alloy::json_abi::JsonAbi;
 use alloy::primitives::{hex, B256};
 use eyre::{Context, Result};
-use openchain_core::{now_millis, DecodedEventRow, LogRow};
+use openchain_core::{now_millis, DecodedCallRow, DecodedEventRow, LogRow, TraceRow};
 use std::collections::HashMap;
 
 struct PreparedEvent {
@@ -72,6 +72,74 @@ impl EventDecoder {
     }
 }
 
+struct PreparedFunction {
+    contract_name: String,
+    name: String,
+    full_signature: String,
+    input_names: Vec<String>,
+    input_types: Vec<DynSolType>,
+}
+
+/// Decodes call inputs from traces into named functions using registered
+/// contract ABIs. Lookup is two hash-map hits (address, then selector).
+#[derive(Default)]
+pub struct FunctionDecoder {
+    functions: HashMap<([u8; 20], [u8; 4]), PreparedFunction>,
+}
+
+impl FunctionDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn function_count(&self) -> usize {
+        self.functions.len()
+    }
+
+    pub fn addresses(&self) -> impl Iterator<Item = &[u8; 20]> {
+        self.functions.keys().map(|(addr, _)| addr)
+    }
+
+    /// Register a contract ABI. Returns the number of decodable functions.
+    pub fn register(&mut self, address: [u8; 20], contract_name: &str, abi_json: &str) -> Result<usize> {
+        let abi: JsonAbi = serde_json::from_str(abi_json).wrap_err("invalid ABI JSON")?;
+        for func in abi.functions() {
+            let input_types = func
+                .inputs
+                .iter()
+                .map(|p| p.resolve())
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .wrap_err_with(|| format!("cannot resolve inputs of {}", func.name))?;
+            let input_names =
+                func.inputs.iter().map(|p| p.name.clone()).collect();
+            self.functions.insert(
+                (address, func.selector().0),
+                PreparedFunction {
+                    contract_name: contract_name.to_string(),
+                    name: func.name.clone(),
+                    full_signature: func.signature(),
+                    input_names,
+                    input_types,
+                },
+            );
+        }
+        Ok(self.function_count())
+    }
+
+    /// Decode one call trace. Returns None when the contract or selector is
+    /// not registered, Some(Err) when the input does not match the ABI.
+    pub fn decode_call(&self, trace: &TraceRow) -> Option<Result<DecodedCallRow>> {
+        if trace.kind != "call" {
+            return None;
+        }
+        let to = trace.to_address?;
+        let data: &[u8] = &trace.input;
+        let (selector, args) = data.split_first_chunk::<4>()?;
+        let func = self.functions.get(&(to, *selector))?;
+        Some(decode_call_row(trace, to, func, args))
+    }
+}
+
 fn decode_row(log: &LogRow, contract: &Contract, event: &PreparedEvent) -> Result<DecodedEventRow> {
     let topics: Vec<B256> = [Some(log.topic0), log.topic1, log.topic2, log.topic3]
         .into_iter()
@@ -101,6 +169,46 @@ fn decode_row(log: &LogRow, contract: &Contract, event: &PreparedEvent) -> Resul
         event_name: event.name.clone(),
         full_signature: event.full_signature.clone(),
         params: serde_json::Value::Object(params).to_string(),
+        insert_version: now_millis(),
+    })
+}
+
+fn decode_call_row(
+    trace: &TraceRow,
+    to: [u8; 20],
+    func: &PreparedFunction,
+    args: &[u8],
+) -> Result<DecodedCallRow> {
+    let tuple = DynSolType::Tuple(func.input_types.clone());
+    let decoded = tuple.abi_decode_params(args).wrap_err_with(|| {
+        format!("cannot decode inputs of {}", func.full_signature)
+    })?;
+    let values = match decoded {
+        DynSolValue::Tuple(items) => items,
+        other => vec![other],
+    };
+
+    let mut params = serde_json::Map::new();
+    for (i, value) in values.iter().enumerate() {
+        let key = match func.input_names.get(i) {
+            Some(name) if !name.is_empty() => name.clone(),
+            _ => format!("param{i}"),
+        };
+        params.insert(key, to_json(value));
+    }
+
+    Ok(DecodedCallRow {
+        chain_id: trace.chain_id,
+        block_number: trace.block_number,
+        tx_hash: trace.tx_hash,
+        tx_index: trace.tx_index,
+        trace_address: trace.trace_address.clone(),
+        address: to,
+        contract_name: func.contract_name.clone(),
+        function_name: func.name.clone(),
+        full_signature: func.full_signature.clone(),
+        params: serde_json::Value::Object(params).to_string(),
+        succeeded: trace.error.is_none(),
         insert_version: now_millis(),
     })
 }

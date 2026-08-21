@@ -48,7 +48,7 @@ openchain follow --chain 1 --datasets blocks,transactions,logs  # tail the head 
 | `follow` | Tail the chain head live; WS `newHeads` when available, HTTP polling fallback, reorg rewind |
 | `status` | Per-dataset row counts, block ranges, watermarks, and head lag |
 | `abi add/list` | Register contract ABIs (Sourcify or local JSON) used by `decode` |
-| `decode` | Incrementally decode raw logs into `decoded_events` (parallel across cores) |
+| `decode` | Incrementally decode raw logs into `decoded_events` and call inputs into `decoded_calls` (parallel across cores) |
 | `sql` | Run SQL against the OpenChain database |
 
 Sync concurrency adapts to the endpoint automatically: it starts at
@@ -83,9 +83,9 @@ queries at ~3 ms, sub-second best-case freshness in follow mode.
 ## Dune parity roadmap
 
 Initial parity target tracked in [Performances.md](Performances.md):
-raw tables (blocks/txs/logs/traces) and decoded events are in; next up are
-decoded calls (ABI-decoded `traces.input`), multi-chain fan-out ergonomics,
-and a reth ExEx source for sub-second, rate-limit-free ingestion.
+raw tables (blocks/txs/logs/traces), decoded events, and decoded calls
+are in; next up are multi-chain fan-out ergonomics and a reth ExEx source
+for sub-second, rate-limit-free ingestion.
 
 ## Layout
 

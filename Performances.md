@@ -170,16 +170,18 @@ Shipped on OxAlpha:
 - **traces dataset** — Parity-style internal transactions, creates,
   selfdestructs via `trace_block` (`--datasets traces`; needs a tracing
   endpoint — publicnode requires a paid token, drpc's free tier works).
-  ~2.4k traces/block on mainnet; ORDER BY (chain_id, block_number, tx_index)
+  ~2k traces/block on mainnet; ORDER BY (chain_id, block_number, tx_index)
   keeps range scans and joins local.
+- **decoded_calls dataset** — ABI-decoded call inputs (`transfer`,
+  `swap`, ...) from registered contracts' traces; produced by
+  `openchain decode` alongside decoded_events with independent watermarks.
+  Verified live: ~33k traces/s single-threaded scan+decode, named params,
+  per-call revert status.
 - **`openchain status`** — per-dataset rows/ranges/watermarks + head lag.
 
 Still missing for credible initial parity, in order:
 
-1. **Decoded calls** — decode `traces.input` against registered ABIs (swap(),
-   transfer()...) into `decoded_calls`. All the pieces exist: we already store
-   traces and have an ABI registry; mirror `openchain decode` for calls.
-2. **Multi-chain ergonomics** — config already supports N chains; add
+1. **Multi-chain ergonomics** — config already supports N chains; add
    `--chain all` fan-out to sync/follow and per-chain status.
-3. **reth ExEx / local node source** (backlog #1) — also unlocks sub-second
+2. **reth ExEx / local node source** (backlog #1) — also unlocks sub-second
    freshness and unblocks trace-heavy ingestion without paid RPCs.

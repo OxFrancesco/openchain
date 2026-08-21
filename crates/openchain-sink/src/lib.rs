@@ -1,7 +1,8 @@
 use clickhouse::{Client, Row};
 use eyre::{Context, Result};
 use openchain_core::{
-    now_millis, AbiRow, BlockBundle, ClickHouseConfig, Dataset, DecodedEventRow, LogRow, TraceRow,
+    now_millis, AbiRow, BlockBundle, ClickHouseConfig, Dataset, DecodedCallRow, DecodedEventRow,
+    LogRow, TraceRow,
 };
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +12,7 @@ const SCHEMAS: &[&str] = &[
     include_str!("../../../schemas/logs.sql"),
     include_str!("../../../schemas/traces.sql"),
     include_str!("../../../schemas/decoded_events.sql"),
+    include_str!("../../../schemas/decoded_calls.sql"),
     include_str!("../../../schemas/abis.sql"),
     include_str!("../../../schemas/sync_status.sql"),
 ];
@@ -249,6 +251,59 @@ impl Sink {
             out.push(DatasetStats { dataset, watermark, rows: count, min_block, max_block });
         }
         Ok(out)
+    }
+
+    pub async fn insert_decoded_calls(&self, rows: &[DecodedCallRow]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert::<DecodedCallRow>("decoded_calls").await?;
+        for row in rows {
+            insert.write(row).await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
+    /// Call traces for a set of contract addresses in a block range.
+    pub async fn calls_for_addresses(
+        &self,
+        chain_id: u64,
+        addresses: &[[u8; 20]],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TraceRow>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let addr_list = addresses
+            .iter()
+            .map(|a| format!("unhex('{}')", hex_lower(a)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(self
+            .client
+            .query(&format!(
+                "SELECT * FROM traces FINAL WHERE chain_id = ? AND kind = 'call' \
+                 AND to_address IN ({addr_list}) AND block_number BETWEEN ? AND ? \
+                 ORDER BY block_number, tx_index"
+            ))
+            .bind(chain_id)
+            .bind(from_block)
+            .bind(to_block)
+            .fetch_all::<TraceRow>()
+            .await?)
+    }
+
+    /// Lowest synced trace block for a chain, used to clamp call decoding.
+    pub async fn min_trace_block(&self, chain_id: u64) -> Result<Option<u64>> {
+        let rows: Vec<u64> = self
+            .client
+            .query("SELECT min(block_number) FROM traces WHERE chain_id = ? HAVING count() > 0")
+            .bind(chain_id)
+            .fetch_all()
+            .await?;
+        Ok(rows.into_iter().next())
     }
 
     /// Recent canonical block hashes, used to seed the follow-mode hot window.

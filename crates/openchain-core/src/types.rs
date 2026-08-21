@@ -14,16 +14,19 @@ pub enum Dataset {
     Traces,
     /// Derived dataset, produced by `openchain decode` rather than sync.
     DecodedEvents,
+    /// ABI-decoded call inputs from traces, produced by `openchain decode`.
+    DecodedCalls,
 }
 
 impl Dataset {
     /// Every block-scoped table, i.e. everything a reorg rewind must touch.
-    pub const ALL: [Dataset; 5] = [
+    pub const ALL: [Dataset; 6] = [
         Dataset::Blocks,
         Dataset::Transactions,
         Dataset::Logs,
         Dataset::Traces,
         Dataset::DecodedEvents,
+        Dataset::DecodedCalls,
     ];
 
     pub fn table(&self) -> &'static str {
@@ -33,8 +36,13 @@ impl Dataset {
             Dataset::Logs => "logs",
             Dataset::Traces => "traces",
             Dataset::DecodedEvents => "decoded_events",
+            Dataset::DecodedCalls => "decoded_calls",
         }
     }
+
+    /// Datasets `openchain sync` can produce (the derived ones cannot).
+    pub const SYNCABLE: [Dataset; 4] =
+        [Dataset::Blocks, Dataset::Transactions, Dataset::Logs, Dataset::Traces];
 
     pub fn parse_list(s: &str) -> Result<Vec<Dataset>> {
         let mut out = Vec::new();
@@ -169,6 +177,27 @@ pub struct TraceRow {
     pub reward_type: String,
     /// Beneficiary of a selfdestruct refund.
     pub refund_address: Option<[u8; 20]>,
+    pub insert_version: u64,
+}
+
+/// One ABI-decoded call input, from a trace whose `to` contract is registered.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct DecodedCallRow {
+    pub chain_id: u64,
+    pub block_number: u64,
+    pub tx_hash: [u8; 32],
+    pub tx_index: u32,
+    /// Position in the call tree, parity style: "" root, "0", "0_1", ...
+    pub trace_address: String,
+    /// The called contract.
+    pub address: [u8; 20],
+    pub contract_name: String,
+    pub function_name: String,
+    pub full_signature: String,
+    /// Decoded parameters as a JSON object keyed by parameter name.
+    pub params: String,
+    /// False when the call reverted or errored.
+    pub succeeded: bool,
     pub insert_version: u64,
 }
 

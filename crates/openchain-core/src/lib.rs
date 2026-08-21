@@ -3,7 +3,8 @@ pub mod types;
 
 pub use config::{ChainConfig, ClickHouseConfig, Config};
 pub use types::{
-    AbiRow, BlockBundle, BlockRow, Dataset, DecodedEventRow, LogRow, TraceRow, TxRow,
+    AbiRow, BlockBundle, BlockRow, Dataset, DecodedCallRow, DecodedEventRow, LogRow, TraceRow,
+    TxRow,
 };
 
 /// Current unix time in milliseconds, used as the ReplacingMergeTree version.
